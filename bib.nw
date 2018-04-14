@@ -1,0 +1,517 @@
+% -*- mode: latex; mmm-noweb-code-mode: sml-mode; -*-
+\documentclass[10pt, a5paper, twoside]{mybook}
+\usepackage{noweb}
+
+\title{The \texttt{bib} Reference Manager}
+\author{Aaron Stockdill}
+\date{Version 0.1.0}
+
+\begin{document}
+
+\pagestyle{empty}
+\maketitle
+
+\frontmatter
+
+\tableofcontents
+
+\mainmatter
+\pagestyle{headings}
+
+\part{User guide}
+
+\part{Library}
+
+\noindent
+\textbf{A short note on style}
+\vspace*{2ex}
+
+\noindent
+The code for [[bib]] is written in Standard ML.\@
+While coding style guides are few and far between,
+common-sense rules such as spacing and indentation are enforced.
+The most prominent feature is the use of currying-by-default:
+only with good reason are functions defined with tuples as parameters.
+
+Variable names use [[camelCase]],
+signatures use [[UPPERCASE]],
+structures will use [[PascalCase]],
+types [[underscore_naming]],
+and constructors will use [[UPPERCASE_WITH_UNDERSCORES]].
+This is strictly enforced to avoid confusion.
+
+\chapter{The objectives of \texttt{bib}}
+
+Writing code is always an attempt to answer the question
+`how can I do this better?'
+In this case,
+the desire for the [[bib]] library
+is born out of a desire for a reference manager that fits the way I work.
+There are many tools that are close:
+BibDesk is almost perfect,
+apart from the fact that libraries and \BibTeX{} files
+are the same thing;
+Mendeley fixes that particular quirk but then makes demands about how it stores PDF files
+(and that is before getting into its ownership).
+I could go on,
+but it would seem apparent that I am a fussy filer---%
+the only option left, obviously,
+was to write a bibliography manager myself.
+
+A good bibliography manager,
+like a good camera,
+is the one that gets used,
+so we approach the architecture of [[bib]]
+as a discrete front-end--back-end design.
+By producing the [[bib]] back-end as a library
+for other systems to call,
+we decouple the problem of logic from interface.
+This means we can have implementations for a wide variety of platforms and modalities.
+Standard software engineering practice,
+but useful to note when reading this manual.
+
+As for the features of the [[bib]] library,
+they are five-fold.
+\begin{itemize}
+\item To create and maintain libraries of references.
+\item To automatically update `projects' of references as \BibTeX{} files as they are edited.
+\item To support rapid searching, filtering, and sorting of references based on types, fields, and fuzzy matching.
+\item To allow automatic filing of resources attached to references, ideally on a per-library basis.
+\item To seamlessly import existing \BibTeX{} files for inclusion into a library.
+\end{itemize}
+Each of these will be explored in more detail in subsequent chapters,
+along with details of the file format and support functions.
+This project will also provide opportunities for
+interesting string algorithms,
+data structures,
+and general code hackery.
+
+
+\chapter{The library}
+
+Any reference management software needs libraries.
+There are two pieces that can be considered the library:
+the file format storing the data,
+and the in-memory data structure.
+Each must be transformable to the other,
+so they are not unrelated.
+To this end, we will explore the two together,
+starting at the level of the \emph{reference}.
+
+\section{Bibliographic references}
+
+A bibliographic reference is a general grouping,
+consisting of a [[citeKey]],
+a [[recordType]],
+and some fields mapping to [[bibValue]]s (fields are strings, for simplicity).
+The fields are theoretically some finite set
+(for example title, author, publisher)
+but they vary dramatically by [[recordType]]
+Hence references consist of just two fixed attributes
+and this collection of fields and values.
+We can summarise this with the data type [[reference]].
+<<concrete type for reference>>=
+datatype reference = REFERENCE of {
+  citeKey: cite_key,
+  recordType: record_type,
+  fields: bib_value StringDict.dict
+}
+@
+
+We will explore the [[cite_key]], [[record_type]], [[bib_value]], and [[StringDict.dict]] types
+in more detail later.
+For now, we can take the first three as string-like, and the last as a dictionary
+(obviously enough).
+
+@
+Our [[reference]] datatype needs to be stored in a file,
+so we must encode and decode it to some serialized form.
+A simple encoding to XML might be as follows:
+\begin{verbatim}
+<reference>
+  <cite-key>bobson99</cite-key>
+  <record-type>article</record-type>
+  <fields>
+    <field>
+      <key>title</key>
+      <value>On foo-ing the bars - a summary</value>
+    </field>
+    <field>
+      <key>author</key>
+      <value>
+        <author>
+          <fname>John</fname>
+          <lname>Bobson</lname>
+        </author>
+      </value>
+    <field>
+  </fields>
+</reference>
+\end{verbatim}
+Verbose, but very readable.
+There are several pieces not directly relevant to the reference
+(such as the \texttt{author} stuff),
+but the broad strokes can be seen clearly.
+Ensuring backwards-compatibility should be simple with this format,
+and extending it for new properties is straight-forward.
+
+Because encoding the reference is simpler than reading it,
+we will start there.
+The function [[xmlEncodeReference]]
+will perform the encoding in the obvious way.
+<<encode reference to XML>>=
+(* xmlEncodeReference: reference -> string *)
+fun xmlEncodeReference refr =
+    let
+        val { citeKey=k,
+              recordType=r,
+              fields=f
+            } = refr;
+        val citeXml = xmlEncodeCiteKey k;
+        val recordXml = xmlEncodeRecord r;
+        val fieldsXml = xmleEncodeFeields f
+    in
+        "<reference>" ^
+            citeXml ^
+            recordXml ^
+            fieldsXml ^
+        "</reference>"
+    end;
+@
+
+@
+For example, we would expect the following correspondence:
+<<XML encoding tests>>=
+test("Validate simple reference encoding.",
+     assert_equals_string("<reference>" ^
+                          "<cite-key>testkey</cite-key>" ^
+                          "<record-type>article</record-type>" ^
+                          "<fields></fields>" ^
+                          "</reference>",
+          xml_encode_reference (REFERENCE {
+                                     citeKey = CITE_KEY "testkey",
+                                     recordType = Article,
+                                     fields = StringDict.empty
+                               })));
+@
+
+@
+Decoding a reference string is significantly more complicated:
+we are parsing XML, which is no mean task.
+In chapter~\ref{chap:parser},
+we discuss the implementation of parser combinators;
+these form the basis of our XML parser,
+we simply need to compose them together.
+
+@
+First we aim to produce a valid [[reference]] record
+with [[xmlDecodeReference]].
+We skip any whitespace,
+and then read in the opening [[<reference>]] tag
+before again skipping any whitespace.
+We now rely on other parsers to handle the parsing of
+the cite key, the record type, and the fields of this reference.
+Finally, we skip whitespace and read in the closing tag.
+The overall structure is to read the opening tag,
+the content,
+and the closing tag.
+All of our XML parsers will follow a similar structure,
+because we are actually parsing a reduced subset of XML:\
+we do not consider attributes.
+<<decode XML to reference>>=
+val xmlDecodeReference: record Parser.parser =
+    Parser.whitespace >>
+    Parser.consumeString "<reference>" >>
+    Parser.whitespace >>
+   (xmlDecodeCiteKey >>= (fn citeKey =>
+    xmlDecodeRecord  >>= (fn recordType =>
+    xmlDecodeFields  >>= (fn fields =>
+    Parser.whitespace >>
+    Parser.consumeString "</reference>" >>
+    Parser.whitespace >>
+    (return REFERENCE {
+         citeKey = citeKey,
+         recordType = recordType,
+         fields = fields
+   })))));
+@
+
+@
+The syntax is a bit strange,
+borrowing Haskell's monad notation
+(although we lack the tidy `do' notation).
+Read [[>>]] as `and then',
+and [[>>=]] as `and then with'.
+Everything else should be relatively obvious.
+
+@
+Seeing the parser in action might clarify things,
+so for example we can attempt to parse a [[string]] to a [[reference]].
+<<XML decoding tests>>=
+test("Validate the decoding of a string to a reference",
+     assert_reference_equals(
+         REFERENCE {
+             citeKey = CITE_KEY "testkey",
+             recordType = Article,
+             fields = StringDict.empty
+         },
+         (xmlDecodeReference o TextIO.openString) (
+             "<reference>" ^
+             "<cite-key>testkey</cite-key>" ^
+             "<record-type>article</record-type>" ^
+             "<fields></fields>" ^
+             "</reference>"
+         )
+    ));
+@
+
+
+
+
+\subsection{Dictionaries of fields}
+
+In the [[reference]] datatype,
+we made use of a [[StringDict.dict]] type;
+this is a dictionary keyed over by strings.
+The implementation is not overly complicated
+(any introductory ML course should introduce how dictionaries are constructed),
+so this subsection is lightly annotated.
+
+\section{\BibTeX{} strings and names}
+
+\section{The library collection}
+
+\chapter{Projects}
+
+\chapter{Searching, sorting, and filtering}
+
+\chapter{External resources}
+
+\chapter{Parser combinators}
+\label{chap:parsers}
+
+To conveniently parse the files required by this library,
+we define some parser combinators.
+The design of this structure is based on the Haskell `Parsec' library%
+\footnote{\url{https://www.microsoft.com/en-us/research/wp-content/uploads/2016/02/parsec-paper-letter.pdf}}.
+The combinators are usually quite simple,
+and there are not many;
+at a basic level there is just
+[[return]],
+[[match]],
+[[<|>]] (read `or'),
+and [[>>=]] (`and then with').
+From these,
+we build up all the pieces we will need.
+<<signature of a parser>>=
+signature PARSER =
+sig
+    type 'a parser
+    type 'a consumed
+    type 'a reply
+    val CONSUMED: 'a reply -> 'a consumed
+    val EMPTY: 'a reply -> 'a consumed
+    val OK: 'a -> 'a reply
+    val ERROR: 'a reply
+
+    val return: 'a -> 'a parser
+    val match: (char -> bool) -> char parser
+    val >>= : ('a parser * ('a -> 'b parser)) -> 'b parser
+    val >> : ('a parser * 'b parser) -> 'b parser
+    val <|> : ('a parser * 'a parser) -> 'a parser
+    val attempt: 'a parser -> 'a parser
+    val repeat: 'a parser -> 'a list parser
+
+    (* Some useful default parsers *)
+    val whitespace: unit parser
+    val consumeString: string -> unit parser
+end
+@
+
+We begin with a definition of a [[parser]].
+A [[parser]] is simply a function from a [[TextIO.instream]] to some output,
+for example it might produce the [[reference]] type.
+<<definition of parser type>>=
+datatype 'a reply = OK of 'a | ERROR;
+datatype 'a consumed = CONSUMED of ('a reply) | EMPTY of ('a reply);
+type 'a parser = TextIO.instream -> 'a consumed;
+@
+
+@
+The parser combinator [[return]] is the most basic,
+essentially the `default' entry-point for building a parser.
+It will always succeed on any input.
+<<return combinator>>=
+fun return x = fn input => EMPTY (OK x);
+@
+
+@
+A slightly more complex,
+but much more useful,
+combinator is the [[match]] combinator,
+taking a character predicate and either consuming a matching character,
+or failing.
+<<match combinator>>=
+fun match test =
+    fn input =>
+       case TextIO.lookahead input of
+           SOME c => (if test c
+           then CONSUMED (OK (case TextIO.input1 input of
+                                  SOME c => c
+                                | NONE => raise Empty))
+                      else EMPTY ERROR)
+         | NONE   => EMPTY ERROR;
+@
+
+@
+Because the grammar might require choice,
+we define a combinator [[<|>]] (read `or')
+where the most appropriate parser is used in a given scenario.
+It proceeds by trying the first parser;
+if this encounters an error we immediately attempt the second parser.
+If the first parser does not error,
+but does not consume any input,
+then we see what the second parser does.
+If the second parser also consumes nothing,
+we default to the result of the first parser;
+if the second parser does consume something, we favour this.
+Finally, if the first parser consumes input,
+we immediately favour it.
+<<choice combinator>>=
+infix 2 <|>
+fun p <|> q =
+    fn input =>
+       case p input of
+           EMPTY ERROR => q input
+         | EMPTY ok    => (case q input of
+                               EMPTY _  => EMPTY ok
+                             | consumed => consumed)
+         | consumed    => consumed;
+@
+
+@
+The most complicated combinator is sequencing, [[>>=]].
+This combinator will try and apply the first combinator,
+leading to one of two cases:
+should there be output, it passes it to the function [[f]] to run the next parser;
+if there is no output, the error is carried through.
+<<sequencing combinator>>=
+infix 2 >>=
+fun p >>= f =
+    fn input =>
+       case p input of
+           EMPTY ERROR     => (EMPTY ERROR)
+         | EMPTY (OK x)    => (f x) input
+         | CONSUMED (OK x) => CONSUMED (case (f x) input of
+                                            CONSUMED reply2 => reply2
+                                          | EMPTY reply2 => reply2)
+         | CONSUMED ERROR  => (CONSUMED ERROR)
+@
+
+@
+There is a second sequencing combinator, [[>>]],
+which ignores the result of the first parser and just immediately applies the second parser.
+It can be defined concisely in terms of the [[>>=]] combinator.
+<<sequencing combinator>>=
+infix 2 >>
+fun p >> q = p >>= (fn _ => q);
+@
+
+@
+The next combinator we look at is very important.
+Until now, the combinators we have defined are only valid for LL(1) grammars:
+that is, grammars where you can make a decision with just one-step lookahead.
+Many languages (such as XML) are \emph{not} LL(1),
+but the more general LL($k$).
+To extend our parser combinators to LL($k$),
+we define the [[attempt]] combinator.
+Essentially, it `fakes' the result such that if the parser reads input but hits an error,
+the parser reports that it did not read any input.
+<<attempt combinator>>=
+fun attempt p =
+    fn input =>
+       case p input of
+           CONSUMED ERROR => EMPTY ERROR
+         | otherwise      => otherwise;
+@
+
+@
+Finally we look at a combinator called [[repeat]].
+This combinator essentially applies the parser as many times as possible.
+The definition is (unsurprisingly) recursive.
+<<repeat combinator>>=
+fun repeat (p: 'a parser): ('a list parser) =
+    p >>= (fn x =>
+              (((repeat p) <|>
+                (return [])) >>= (fn xs =>
+                                     return (x::xs))));
+@
+
+@
+Now that we have these `base' combinators,
+we can build some simple parsers on top of them.
+For example,
+if we want a parser that will skip whitespace,
+we might use the following:
+<<whitespace parser>>=
+val whitespace =
+    let
+        val _ = repeat (match Char.isSpace)
+    in
+        return ()
+    end;
+@
+
+@
+Another useful parser is one to consume a specific string,
+which we call [[consumeString]].
+The definition should almost be obvious.
+<<specific string parser>>=
+fun consumeString str =
+    let
+        fun consChrs ([]: char list): unit parser = return ()
+          | consChrs (c::cs) = match (fn x => x = c) >> (consChrs cs)
+    in
+        consChrs (String.explode str)
+    end;
+@
+
+@
+We can arrange all of these parser pieces
+into a [[Parser]] structure.
+<<parser structure>>=
+structure Parser :> PARSER =
+struct
+    <<definition of parser type>>
+    <<return combinator>>
+    <<match combinator>>
+    <<sequencing combinator>>
+    <<choice combinator>>
+    <<attempt combinator>>
+    <<repeat combinator>>
+
+    (* Some useful parsers *)
+    <<whitespace parser>>
+    <<specific string parser>>
+end;
+@
+
+
+
+\part{Interfaces}
+
+@
+A small placeholder functions as the interface for now.
+<<bib.sml>>=
+<<signature of a parser>>
+<<parser structure>>
+
+fun main () =
+    print "Hello, world!\n"
+
+val _ = main()
+@
+
+\backmatter
+
+\end{document}
