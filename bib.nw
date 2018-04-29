@@ -168,7 +168,7 @@ fun xmlEncodeReference refr =
               fields=f
             } = refr;
         val citeXml = xmlEncodeCiteKey k;
-        val recordXml = xmlEncodeRecord r;
+        val recordXml = xmlEncodeRecordType r;
         val fieldsXml = xmleEncodeFeields f
     in
         "<reference>" ^
@@ -190,7 +190,7 @@ test("Validate simple reference encoding.",
                           "</reference>",
           xml_encode_reference (REFERENCE {
                                      citeKey = CITE_KEY "testkey",
-                                     recordType = Article,
+                                     recordType = ARTICLE,
                                      fields = StringDict.empty
                                })));
 @
@@ -223,17 +223,17 @@ val xmlDecodeReference: record Parser.parser =
     Parser.whitespace >>
     Parser.consumeString "<reference>" >>
     Parser.whitespace >>
-   (xmlDecodeCiteKey >>= (fn citeKey =>
-    xmlDecodeRecord  >>= (fn recordType =>
-    xmlDecodeFields  >>= (fn fields =>
+    xmlDecodeCiteKey    >>= (fn citeKey =>
+    xmlDecodeRecordType >>= (fn recordType =>
+    xmlDecodeFields     >>= (fn fields =>
     Parser.whitespace >>
     Parser.consumeString "</reference>" >>
     Parser.whitespace >>
-    (return REFERENCE {
+    Parser.return (REFERENCE {
          citeKey = citeKey,
          recordType = recordType,
          fields = fields
-   })))));
+   }))));
 @
 
 @
@@ -249,13 +249,13 @@ Seeing the parser in action might clarify things,
 so for example we can attempt to parse a [[string]] to a [[reference]].
 <<XML decoding tests>>=
 test("Validate the decoding of a string to a reference",
-     assert_reference_equals(
+     assert_equals_reference(
          REFERENCE {
              citeKey = CITE_KEY "testkey",
-             recordType = Article,
+             recordType = ARTICLE,
              fields = StringDict.empty
          },
-         (xmlDecodeReference o TextIO.openString) (
+         xmlDecodeReference (
              "<reference>" ^
              "<cite-key>testkey</cite-key>" ^
              "<record-type>article</record-type>" ^
@@ -265,12 +265,176 @@ test("Validate the decoding of a string to a reference",
     ));
 @
 
+@
+Citation keys are a fundamental part of referencing software:
+these unique identifiers allow us to index references efficiently
+and reference them from tools like \LaTeX{}.
+In the interest of allowing for future expansion,
+and some type safety,
+we define a type for cite keys.
+<<cite key type definition>>=
+type cite_key = CITE_KEY of string;
+@
 
+@
+Because we must be able to read and write them from the library,
+we define some very basic XML encoders and parsers.
+Starting with the encoder as before,
+because it is simpler:
+<<encode cite key to XML>>=
+fun xmlEncodeCiteKey (CITE_KEY key) =
+    "<cite-key>" ^ key ^ "</cite-key>";
+@
 
+And the obligatory example:
+<<XML encoding tests>>=
+test("Validate simple cite-key encoding",
+     assert_equals_string(
+         "<cite-key>testkey</cite-key>",
+         xmlEncodeCiteKey (CITE_KEY "testkey")
+    ));
+@
 
-\subsection{Dictionaries of fields}
+Parsing the cite key is relatively trivial,
+as it is just a string.
+A cite key should be one or more
+printable ASCII characters not in the set of [["@',#} {~\%]] %"
+(which includes space).
+<<read a cite key>>=
+fun isValidCiteKeyChar c =
+    let
+        val badChars = [ #" ", #"\"", #"@", #"'", #",", #"\\",
+                         #"#", #"{", #"}", #"~", #"%" ]
+    in
+        (Char.isAscii c)
+        andalso not (Char.isControl c)
+        andalso not (List.exists (fn x => x = c) badChars)
+    end;
 
-In the [[reference]] datatype,
+val readCiteKeyString: string Parser.parser =
+    repeat (match isValidCiteKeyChar) >>= (fn cs => String.implode cs);
+
+@
+@ The full cite key parser falls out easily from helper parser.
+We check for the correct tags and round up surrounding white space.
+<<parse XML to cite key>>=
+val xmlDecodeCiteKey: cite_key Parser.parser =
+    Parser.whitespace >>
+    Parser.consumeString "<cite-key>" >>
+    readCiteKeyString >>= (fn citeKey =>
+    Parser.whitespace >>
+    Parser.consumeString "</cite-key>" >>
+    Parser.whitespace >>
+    Parser.return (CITE_KEY citeKey)));
+@
+
+@
+As before,
+we test our short function with an example.
+<<XML decoding tests>>=
+test("Decoding XML to cite key",
+     assert_equals_cite_key(
+         CITE_KEY "testkey",
+         xmlDecodeCiteKey "<cite-key>testkey</cite-key>"
+    ));
+@
+
+@
+Sadly the record type is not so straight forward as the cite key.
+Because it comes from a short set of possible values,
+we can model it with a sum type;
+the type safety associated with this is appreciated,
+but not so simple to implement.
+<<define the record-type datatype>>=
+datatype record_type =
+         ARTICLE
+       | BOOK
+       | BOOKLET
+       | INBOOK
+       | INCOLLECTION
+       | INPROCEEDINGS
+       | MANUAL
+       | MASTERSTHESIS
+       | MISC
+       | PHDTHESIS
+       | PROCEEDINGS
+       | TECHREPORT
+       | UNPUBLISHED;
+@
+
+@
+While the type is long-winded, it is at least simple.
+It is a similar case for the XML encoder:
+<<encode record type to XML>>=
+fun xmlEncodeRecordType recordType =
+    "<record-type>" ^
+    (case recordType of
+         ARTICLE       => "article"
+       | BOOK          => "book"
+       | BOOKLET       => "booklet"
+       | INBOOK        => "inbook"
+       | INCOLLECTION  => "incollection"
+       | INPROCEEDINGS => "inproceedings"
+       | MANUAL        => "manual"
+       | MASTERSTHESIS => "mastersthesis"
+       | MISC          => "misc"
+       | PHDTHESIS     => "phdthesis"
+       | PROCEEDINGS   => "proceedings"
+       | TECHREPORT    => "techreport"
+       | UNPUBLISHED   => "unpublished"
+    ) ^
+    "</record-type>";
+@
+
+@
+For example,
+if we have a [[BOOK]],
+the encoding would be as follows:
+<<XML encoding tests>>=
+test("Verify encoding record types",
+     assert_equals_string(
+         "<record-type>book</record-type>",
+         xmlEncodeRecord BOOK
+    ));
+@
+
+@
+Decoding the XML is simply a case of
+attempting the disjunction of all named record types.
+<<read record type string into [[record_type]]>>=
+val readRecordTypeString: record_type Parser.parser =
+    let struct P = Parser in
+    (P.attempt (P.consumeString "article" >> P.return ARTICLE)) <|>
+    (P.attempt (P.consumeString "book" >> P.return BOOK)) <|>
+    (P.attempt (P.consumeString "booklet" >> P.return BOOKLET)) <|>
+    (P.attempt (P.consumeString "inbook" >> P.return INBOOK)) <|>
+    (P.attempt (P.consumeString "incollection" >> P.return INCOLLECTION)) <|>
+    (P.attempt (P.consumeString "inproceedings" >> P.return INPROCEEDINGS)) <|>
+    (P.attempt (P.consumeString "manual" >> P.return MANUAL)) <|>
+    (P.attempt (P.consumeString "mastersthesis" >> P.return MASTERSTHESIS)) <|>
+    (P.attempt (P.consumeString "misc" >> P.return MISC)) <|>
+    (P.attempt (P.consumeString "phdthesis" >> P.return PHDTHESIS)) <|>
+    (P.attempt (P.consumeString "proceedings" >> P.return PROCEEDINGS)) <|>
+    (P.attempt (P.consumeString "techreport" >> P.return TECHREPORT)) <|>
+    (P.attempt (P.consumeString "unpublished" >> P.return UNPUBLISHED)) end;
+@
+
+@
+We now just wrap it up in
+<<decode XML to record type>>=
+val xmlDecodeRecordType: record_type Parser.parser =
+    Parser.whitespace >>
+    Parser.consumeString "<record-type>" >>
+    Parser.whitespace >>
+    readRecordTypeString  (fn recordType =>
+    Parser.whitespace >>
+    Parser.consumeString "<record-type>" >>
+    Parser.whitespace >>
+    Parser.return recordType);
+@
+
+@
+Earlier, in the [[reference]] datatype,
 we made use of a [[StringDict.dict]] type;
 this is a dictionary keyed over by strings.
 The implementation is not overly complicated
@@ -329,12 +493,12 @@ end
 @
 
 We begin with a definition of a [[parser]].
-A [[parser]] is simply a function from a [[TextIO.instream]] to some output,
+A [[parser]] is simply a function from a [[string]] to some output (and the rest of the unprocessed string),
 for example it might produce the [[reference]] type.
 <<definition of parser type>>=
-datatype 'a reply = OK of 'a | ERROR;
+datatype 'a reply = OK of ('a * string) | ERROR;
 datatype 'a consumed = CONSUMED of ('a reply) | EMPTY of ('a reply);
-type 'a parser = TextIO.instream -> 'a consumed;
+type 'a parser = string -> 'a consumed;
 @
 
 @
@@ -342,7 +506,7 @@ The parser combinator [[return]] is the most basic,
 essentially the `default' entry-point for building a parser.
 It will always succeed on any input.
 <<return combinator>>=
-fun return x = fn input => EMPTY (OK x);
+fun return x = fn input => EMPTY (OK (x, input));
 @
 
 @
@@ -354,10 +518,10 @@ or failing.
 <<match combinator>>=
 fun match test =
     fn input =>
-       case TextIO.lookahead input of
+       case String.sub(input, 0) of
            SOME c => (if test c
-           then CONSUMED (OK (case TextIO.input1 input of
-                                  SOME c => c
+           then CONSUMED (OK (case String.sub(input, 0) of
+                                  SOME c => (c, String.extract(input, 1, NONE))
                                 | NONE => raise Empty))
                       else EMPTY ERROR)
          | NONE   => EMPTY ERROR;
@@ -382,11 +546,11 @@ infix 2 <|>
 fun p <|> q =
     fn input =>
        case p input of
-           EMPTY ERROR => q input
-         | EMPTY ok    => (case q input of
-                               EMPTY _  => EMPTY ok
-                             | consumed => consumed)
-         | consumed    => consumed;
+           EMPTY ERROR           => q input
+         | EMPTY OK (a, input')  => (case q input' of
+                                         EMPTY _  => EMPTY OK (a, input')
+                                       | consumed => consumed)
+         | consumed              => consumed;
 @
 
 @
@@ -400,12 +564,12 @@ infix 2 >>=
 fun p >>= f =
     fn input =>
        case p input of
-           EMPTY ERROR     => (EMPTY ERROR)
-         | EMPTY (OK x)    => (f x) input
-         | CONSUMED (OK x) => CONSUMED (case (f x) input of
-                                            CONSUMED reply2 => reply2
-                                          | EMPTY reply2 => reply2)
-         | CONSUMED ERROR  => (CONSUMED ERROR)
+           EMPTY ERROR               => (EMPTY ERROR)
+         | EMPTY (OK (x, input'))    => (f x) input'
+         | CONSUMED (OK (x, input')) => CONSUMED (case (f x) input' of
+                                                      CONSUMED reply2 => reply2
+                                                    | EMPTY reply2 => reply2)
+         | CONSUMED ERROR            => (CONSUMED ERROR)
 @
 
 @
