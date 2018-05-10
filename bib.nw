@@ -169,7 +169,7 @@ fun xmlEncodeReference refr =
             } = refr;
         val citeXml = xmlEncodeCiteKey k;
         val recordXml = xmlEncodeRecordType r;
-        val fieldsXml = xmleEncodeFeields f
+        val fieldsXml = xmleEncodeFields f
     in
         "<reference>" ^
             citeXml ^
@@ -475,7 +475,7 @@ sig
     type 'a reply
     val CONSUMED: 'a reply -> 'a consumed
     val EMPTY: 'a reply -> 'a consumed
-    val OK: 'a -> 'a reply
+    val OK: ('a * string) -> 'a reply
     val ERROR: 'a reply
 
     val return: 'a -> 'a parser
@@ -517,14 +517,21 @@ taking a character predicate and either consuming a matching character,
 or failing.
 <<match combinator>>=
 fun match test =
+    let
+        fun stringHead s = SOME (String.sub (s, 0))
+                           handle Subscript => NONE;
+        fun stringTail s = String.extract(s, 1, NONE)
+                           handle Subscript => s;
+    in
     fn input =>
-       case String.sub(input, 0) of
+       case stringHead input of
            SOME c => (if test c
-           then CONSUMED (OK (case String.sub(input, 0) of
-                                  SOME c => (c, String.extract(input, 1, NONE))
-                                | NONE => raise Empty))
+                      then CONSUMED (OK (case stringHead input of
+                                             SOME c => (c, stringTail input)
+                                           | NONE => raise Empty))
                       else EMPTY ERROR)
-         | NONE   => EMPTY ERROR;
+         | NONE   => EMPTY ERROR
+    end;
 @
 
 @
@@ -546,11 +553,11 @@ infix 2 <|>
 fun p <|> q =
     fn input =>
        case p input of
-           EMPTY ERROR           => q input
-         | EMPTY OK (a, input')  => (case q input' of
-                                         EMPTY _  => EMPTY OK (a, input')
-                                       | consumed => consumed)
-         | consumed              => consumed;
+           EMPTY ERROR            => q input
+         | EMPTY (OK (a, input')) => (case q input' of
+                                          EMPTY _  => EMPTY (OK (a, input'))
+                                        | consumed => consumed)
+         | consumed               => consumed;
 @
 
 @
