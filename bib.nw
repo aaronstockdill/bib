@@ -470,13 +470,7 @@ we build up all the pieces we will need.
 <<signature of a parser>>=
 signature PARSER =
 sig
-    type 'a parser
-    type 'a consumed
-    type 'a reply
-    val CONSUMED: 'a reply -> 'a consumed
-    val EMPTY: 'a reply -> 'a consumed
-    val OK: ('a * string) -> 'a reply
-    val ERROR: 'a reply
+    <<definition of parser type>>
 
     val return: 'a -> 'a parser
     val match: (char -> bool) -> char parser
@@ -485,6 +479,8 @@ sig
     val <|> : ('a parser * 'a parser) -> 'a parser
     val attempt: 'a parser -> 'a parser
     val repeat: 'a parser -> 'a list parser
+
+    val runParser: 'a parser -> string -> 'a consumed
 
     (* Some useful default parsers *)
     val whitespace: unit parser
@@ -496,7 +492,7 @@ We begin with a definition of a [[parser]].
 A [[parser]] is simply a function from a [[string]] to some output (and the rest of the unprocessed string),
 for example it might produce the [[reference]] type.
 <<definition of parser type>>=
-datatype 'a reply = OK of ('a * string) | ERROR;
+datatype 'a reply = OK of ('a * string) | ERROR of string;
 datatype 'a consumed = CONSUMED of ('a reply) | EMPTY of ('a reply);
 type 'a parser = string -> 'a consumed;
 @
@@ -529,8 +525,8 @@ fun match test =
                       then CONSUMED (OK (case stringHead input of
                                              SOME c => (c, stringTail input)
                                            | NONE => raise Empty))
-                      else EMPTY ERROR)
-         | NONE   => EMPTY ERROR
+                      else EMPTY (ERROR input))
+         | NONE   => EMPTY (ERROR input)
     end;
 @
 
@@ -553,7 +549,7 @@ infix 2 <|>
 fun p <|> q =
     fn input =>
        case p input of
-           EMPTY ERROR            => q input
+           EMPTY (ERROR input')   => q input
          | EMPTY (OK (a, input')) => (case q input' of
                                           EMPTY _  => EMPTY (OK (a, input'))
                                         | consumed => consumed)
@@ -571,12 +567,12 @@ infix 2 >>=
 fun p >>= f =
     fn input =>
        case p input of
-           EMPTY ERROR               => (EMPTY ERROR)
+           EMPTY (ERROR input')      => (EMPTY (ERROR input'))
          | EMPTY (OK (x, input'))    => (f x) input'
          | CONSUMED (OK (x, input')) => CONSUMED (case (f x) input' of
                                                       CONSUMED reply2 => reply2
                                                     | EMPTY reply2 => reply2)
-         | CONSUMED ERROR            => (CONSUMED ERROR)
+         | CONSUMED (ERROR input')   => (CONSUMED (ERROR input'))
 @
 
 @
@@ -602,8 +598,8 @@ the parser reports that it did not read any input.
 fun attempt p =
     fn input =>
        case p input of
-           CONSUMED ERROR => EMPTY ERROR
-         | otherwise      => otherwise;
+           CONSUMED (ERROR input') => EMPTY (ERROR input)
+         | otherwise               => otherwise;
 @
 
 @
@@ -648,6 +644,13 @@ fun consumeString str =
 @
 
 @
+Finally, the moment has come.
+We are able to run the parser.
+<<run parser>>=
+fun runParser p input = p input;
+@
+
+@
 We can arrange all of these parser pieces
 into a [[Parser]] structure.
 <<parser structure>>=
@@ -660,6 +663,7 @@ struct
     <<choice combinator>>
     <<attempt combinator>>
     <<repeat combinator>>
+    <<run parser>>
 
     (* Some useful parsers *)
     <<whitespace parser>>
